@@ -6,7 +6,7 @@ import logging
 import subprocess
 import re
 
-nodefolder = os.path.join(folder_paths.get_folder_paths("custom_nodes")[0], "comfyui-photoshop")
+nodefolder = os.path.join(folder_paths.get_folder_paths("custom_nodes")[0], "comfyui-photoshop-v2")
 py = os.path.join(nodefolder, "py")
 backend_path = os.path.join(py, "backend")
 nodes = os.path.join(py, "nodes")
