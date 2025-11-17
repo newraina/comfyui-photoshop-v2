@@ -9,6 +9,8 @@ import numpy as np
 import msgpack
 from BPutils import force_pull, install_plugin, dirs
 from PIL import Image
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -124,74 +126,115 @@ class WebSocketManager:
 ws_manager = WebSocketManager()
 
 
+def _process_image_sync(index: int, image_dict: dict, psimg_path: str) -> dict:
+    """Synchronous image processing (runs in thread pool)"""
+    title = "Untitled"
+    try:
+        title = image_dict["title"]
+        image_info = image_dict["imageInfo"]
+
+        if isinstance(image_info, str) and image_info.startswith("/9j/"):
+            # JPEG base64
+            image_bytes = base64.b64decode(image_info)
+            image = Image.open(io.BytesIO(image_bytes))
+            width, height = image.size
+
+            # Save image directly
+            save_path = os.path.join(psimg_path, f"{title}.png")
+            image.save(save_path)
+            return {"success": True, "title": title, "size": (width, height)}
+
+        # Raw image data
+        image_data = image_info["imageData"]
+        transparent = image_info.get("transparent", False)
+        width = image_info["width"]
+        height = image_info["height"]
+
+        expected_size_with_alpha = height * width * 4
+        expected_size_without_alpha = height * width * 3
+
+        if len(image_data) == expected_size_with_alpha:
+            channels = 4
+        elif len(image_data) == expected_size_without_alpha:
+            channels = 3
+        else:
+            raise ValueError(f"Invalid image data size. Expected {expected_size_with_alpha} or {expected_size_without_alpha}, got {len(image_data)}")
+
+        image_array = np.array(image_data, dtype=np.uint8).reshape((height, width, channels))
+
+        mode = "RGBA" if channels == 4 else "RGB"
+        image = Image.fromarray(image_array, mode=mode)
+
+        source_bounds = image_info.get("sourceBounds", {"left": 0, "right": width, "top": 0, "bottom": height})
+        left = source_bounds.get("left", 0)
+        right = source_bounds.get("right", width)
+        top = source_bounds.get("top", 0)
+        bottom = source_bounds.get("bottom", height)
+
+        source_width = right - left
+        source_height = bottom - top
+
+        resized_image = image.resize((source_width, source_height), Image.Resampling.LANCZOS)
+        is_full_size = left == 0 and right == width and top == 0 and bottom == height
+
+        if is_full_size:
+            final_image = resized_image
+        else:
+            if channels == 4:
+                background = (0, 0, 0, 0)
+            else:
+                background = (255, 255, 255)
+
+            background_image = Image.new(mode, (width, height), background)
+            background_image.paste(resized_image, (left, top))
+            final_image = background_image
+
+        # Save final image
+        save_path = os.path.join(psimg_path, f"{title}.png")
+        final_image.save(save_path)
+        return {"success": True, "title": title, "size": (width, height)}
+
+    except Exception as e:
+        logger.error(f"❌ Error processing image ({title}): {e}", exc_info=True)
+        return {"success": False, "title": title, "error": str(e)}
+
+
+async def process_single_image(index: int, image_dict: dict, executor: ThreadPoolExecutor) -> None:
+    """Process a single image using thread pool"""
+    logger.info(f"🔵 Processing image {index}: {image_dict.keys()}")
+    
+    # Run CPU-intensive work in thread pool
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(executor, _process_image_sync, index, image_dict, dirs.psimg)
+    
+    if result["success"]:
+        logger.info(f"✅ Image saved: {result['title']} ({result['size'][0]}x{result['size'][1]})")
+    else:
+        logger.error(f"❌ Failed to process: {result['title']} - {result.get('error', 'Unknown error')}")
+
+
 async def process_changed_images(image_list: list) -> None:
-
-    for index, image_dict in enumerate(image_list):
-        title = "Untitled"
-        try:
-            title = image_dict["title"]
-            image_info = image_dict["imageInfo"]
-
-            if isinstance(image_info, str) and image_info.startswith("/9j/"):
-                image_bytes = base64.b64decode(image_info)
-                image = Image.open(io.BytesIO(image_bytes))
-                width, height = image.size
-
-                # Save image directly
-                save_path = os.path.join(dirs.psimg, f"{title}.png")
-                image.save(save_path)
-                continue
-
-            image_data = image_info["imageData"]
-            transparent = image_info.get("transparent", False)
-            width = image_info["width"]
-            height = image_info["height"]
-
-            expected_size_with_alpha = height * width * 4
-            expected_size_without_alpha = height * width * 3
-
-            if len(image_data) == expected_size_with_alpha:
-                channels = 4
-            elif len(image_data) == expected_size_without_alpha:
-                channels = 3
-            else:
-                raise ValueError(f"Invalid image data size. Expected {expected_size_with_alpha} or {expected_size_without_alpha}, got {len(image_data)}")
-
-            image_array = np.array(image_data, dtype=np.uint8).reshape((height, width, channels))
-
-            mode = "RGBA" if channels == 4 else "RGB"
-            image = Image.fromarray(image_array, mode=mode)
-
-            source_bounds = image_info.get("sourceBounds", {"left": 0, "right": width, "top": 0, "bottom": height})
-            left = source_bounds.get("left", 0)
-            right = source_bounds.get("right", width)
-            top = source_bounds.get("top", 0)
-            bottom = source_bounds.get("bottom", height)
-
-            source_width = right - left
-            source_height = bottom - top
-
-            resized_image = image.resize((source_width, source_height), Image.Resampling.LANCZOS)
-            is_full_size = left == 0 and right == width and top == 0 and bottom == height
-
-            if is_full_size:
-                final_image = resized_image
-            else:
-                if channels == 4:
-                    background = (0, 0, 0, 0)  # پس‌زمینه شفاف
-                else:
-                    background = (255, 255, 255)  # پس‌زمینه سفید
-
-                background_image = Image.new(mode, (width, height), background)
-                background_image.paste(resized_image, (left, top))
-                final_image = background_image
-
-            # ذخیره تصویر نهایی
-            save_path = os.path.join(dirs.psimg, f"{title}.png")
-            final_image.save(save_path)
-
-        except Exception as e:
-            logger.error(f"Error processing image ({title}): {e}", exc_info=True)
+    """Process multiple images in parallel using thread pool"""
+    if not image_list:
+        return
+        
+    logger.info(f"🚀 Processing {len(image_list)} images in parallel...")
+    
+    # Create thread pool executor (max workers = number of images or 4, whichever is smaller)
+    max_workers = min(len(image_list), 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Create tasks for parallel processing
+        tasks = [process_single_image(index, image_dict, executor) for index, image_dict in enumerate(image_list)]
+        
+        # Process all images concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Log any errors
+    errors = [r for r in results if isinstance(r, Exception)]
+    if errors:
+        logger.warning(f"⚠️ {len(errors)} images failed to process")
+    else:
+        logger.info(f"✅ Successfully processed all {len(image_list)} images")
 
 
 async def process_and_save_mask(mask_data: dict, output_filename: str) -> None:

@@ -9,6 +9,7 @@ import numpy as np
 from io import BytesIO
 import folder_paths
 import asyncio
+import time
 from PIL import Image, ImageOps, ImageSequence, ImageFile
 
 nodepath = os.path.join(folder_paths.get_folder_paths("custom_nodes")[0], "comfyui-photoshop")
@@ -63,7 +64,8 @@ class PsImages:
     FUNCTION = "select_image"
     CATEGORY = "🔹BluePixel/ToolBar"
 
-    async def load_image_with_retry(self, image_path):
+    def load_image_with_retry(self, image_path):
+        """Synchronous image loading with retry logic"""
         delay = 0.1
         max_attempts = 5
         for attempt in range(max_attempts):
@@ -74,7 +76,7 @@ class PsImages:
             except (IOError, OSError, Image.DecompressionBombError) as e:
                 if attempt == max_attempts - 1:
                     raise Exception(f"Failed to load image after {max_attempts} attempts: {e}")
-                await asyncio.sleep(delay)
+                time.sleep(delay)
                 delay *= 2
 
     def select_image(self, ImageName):
@@ -88,7 +90,9 @@ class PsImages:
         try:
             # Process main image
             image_path = os.path.join(imgpath, ImageName + ".png")
-            img = asyncio.run(self.load_image_with_retry(image_path))
+            print(f"🔵 Loading image from: {image_path}")
+            img = self.load_image_with_retry(image_path)
+            print(f"✅ Image loaded successfully: {img.size}, mode: {img.mode}")
 
             output_images = []
             output_masks = []
@@ -136,7 +140,7 @@ class PsImages:
 
             # Process SELECTION.png
             try:
-                selection_img = asyncio.run(self.load_image_with_retry(os.path.join(imgpath, "SELECTION.png")))
+                selection_img = self.load_image_with_retry(os.path.join(imgpath, "SELECTION.png"))
                 selection_mask = []
                 for frame in ImageSequence.Iterator(selection_img):
                     frame = ImageOps.exif_transpose(frame).convert("RGB")
@@ -152,7 +156,9 @@ class PsImages:
             selection_mask = selection_mask[:, :h, :w] if selection_mask.shape[1:] != (h, w) else selection_mask
 
         except Exception as e:
-            print(f"Error loading image: {e}")
+            print(f"❌ Error loading image '{ImageName}': {e}")
+            import traceback
+            traceback.print_exc()
             return (output_image, output_mask, selection_mask, w, h)
 
         return (output_image, output_mask, selection_mask, w, h)

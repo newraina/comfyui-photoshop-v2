@@ -181,7 +181,18 @@ class ComfyUIToPhotoshop(SaveImage):
         extra_pnginfo=None,
     ):
         x = self.save_images(output, filename_prefix, prompt, extra_pnginfo)
-        asyncio.run(self.connect_to_backend(x["ui"]["images"][0]["filename"]))
+        
+        import threading
+        
+        def send_in_thread():
+            try:
+                asyncio.run(self.connect_to_backend(x["ui"]["images"][0]["filename"]))
+            except Exception as e:
+                print(f"Error sending to PS: {e}")
+        
+        thread = threading.Thread(target=send_in_thread, daemon=True)
+        thread.start()
+        
         return x
 
 
